@@ -1,0 +1,686 @@
+<?php
+
+/**
+ * Implements hook_install().
+ */
+function commerce_inline_shopee_install() { 
+  db_update('system')
+    ->fields(array('weight' => 1))
+    ->condition('name', 'commerce_inline_shopee', '=')
+    ->execute();
+}
+
+/**
+ * Implements hook_entity_info_alter().
+ */
+function commerce_inline_shopee_entity_info_alter(&$entity_info) {
+  if (isset($entity_info['commerce_product'])) {
+    $entity_info['commerce_product']['inline entity form'] = array(
+      'controller' => 'CommerceProductCommerceInlineShopeeController',
+    );
+  }
+}
+
+/**
+ * Implements hook_field_widget_info().
+ */
+function commerce_inline_shopee_field_widget_info() {
+  $widgets = array();
+
+  $widgets['inline_entity_form'] = array(
+    'label' => t('Inline entity form - Editable Multiple Value'),
+    'field types' => array('commerce_product_reference'),
+    'settings' => array(
+      'fields' => array(),
+      'type_settings' => array(),
+    ),
+    'behaviors' => array(
+      'multiple values' => FIELD_BEHAVIOR_CUSTOM,
+      'default value' => FIELD_BEHAVIOR_NONE,
+    ),
+  );
+
+  return $widgets;
+}
+
+function commerce_inline_shopee_field_widget_form(&$form, &$form_state, $field, $instance, $langcode, $items, $delta, $element) {
+  drupal_add_css(drupal_get_path('module', 'commerce_inline_shopee') . '/css/shopee.css');
+
+  $widget = $instance['widget'];
+  $settings = inline_entity_form_settings($field, $instance);
+  $entity_info = entity_get_info($settings['entity_type']);
+  $controller = inline_entity_form_get_controller($instance);
+  // The current entity type is not supported, execution can't continue.
+  if (!$controller) {
+    return array();
+  }
+
+  // Get the entity type labels for the UI strings.
+  $labels = $controller->labels();
+
+  // Build a parents array for this element's values in the form.
+  $parents = array_merge($element['#field_parents'], array($element['#field_name'], $element['#language']));
+
+  // Get the langcode of the parent entity.
+  $parent_langcode = entity_language($element['#entity_type'], $element['#entity']);
+
+  // Assign a unique identifier to each IEF widget.
+  // Since $parents can get quite long, sha1() ensures that every id has
+  // a consistent and relatively short length while maintaining uniqueness.
+  $ief_id = sha1(implode('-', $parents));
+  // Determine the wrapper ID for the entire element.
+  $wrapper = 'inline-entity-form-' . $ief_id;
+  $element = array(
+    '#type' => 'fieldset',
+    '#tree' => TRUE,
+    '#description' => filter_xss_admin($instance['description']),
+    '#prefix' => '<div id="' . $wrapper . '">',
+    '#suffix' => '</div>',
+    '#attached' => array(
+      'css' => array(),
+    ),
+    '#ief_id' => $ief_id,
+    '#ief_root' => TRUE,
+  ) + $element;
+
+  if (module_exists('file')) {
+    // file.js triggers uploads when the main Submit button is clicked.
+    $element['#attached']['js'] = array(
+      drupal_get_path('module', 'file') . '/file.js',
+      drupal_get_path('module', 'inline_entity_form') . '/inline_entity_form.js',
+    );
+  }
+
+  $base_css = array(
+    'base' => drupal_get_path('module', 'inline_entity_form') . '/theme/inline_entity_form.css',
+    'seven' => drupal_get_path('module', 'inline_entity_form') . '/theme/inline_entity_form.seven.css',
+  );
+  // Add the base module CSS.
+  _inline_entity_form_attach_css($base_css, $element['#attached']['css']);
+  // Add entity type specific CSS.
+  _inline_entity_form_attach_css($controller->css(), $element['#attached']['css']);
+
+  // Initialize the IEF array in form state.
+  if (empty($form_state['inline_entity_form'][$ief_id])) {
+    $form_state['inline_entity_form'][$ief_id] = array(
+      'form' => NULL,
+      'settings' => $settings,
+      'instance' => $instance,
+    );
+
+    // Load the entities from the $items array and store them in the form
+    // state for further manipulation.
+    $form_state['inline_entity_form'][$ief_id]['entities'] = array();
+    $entity_ids = array();
+    foreach ($items as $item) {
+      $entity_ids[] = $item[$settings['column']];
+    }
+
+    $delta = 0;
+    foreach (entity_load($settings['entity_type'], $entity_ids) as $entity) {
+      $form_state['inline_entity_form'][$ief_id]['entities'][$delta] = array(
+        'entity' => $entity,
+        'weight' => $delta,
+        'form' => NULL,
+        'needs_save' => FALSE,
+      );
+
+      $delta++;
+    }
+  }
+
+  // Prepare cardinality information.
+  $cardinality = $field['cardinality'];
+  $entity_count = count($form_state['inline_entity_form'][$ief_id]['entities']);
+  $cardinality_reached = ($cardinality > 0 && $entity_count == $cardinality);
+
+  // Build the appropriate widget.
+  // Build the "Multiple value" widget.
+  $element['#element_validate'] = array('inline_entity_form_update_row_weights');
+  // Add the required element marker & validation.
+  if ($element['#required']) {
+    $element['#title'] .= ' ' . theme('form_required_marker', array('element' => $element));
+    $element['#element_validate'][] = 'inline_entity_form_required_field';
+  }
+
+  $element['entities'] = array(
+    '#tree' => TRUE,
+    '#theme' => 'commerce_inline_shopee_entity_table',
+    '#entity_type' => $settings['entity_type'],
+    '#cardinality' => (int) $cardinality,
+  );
+
+  // Get the fields that should be displayed in the table.
+  $fields = $controller->tableFields($settings['bundles']);
+  $context = array(
+    'parent_entity_type' => $instance['entity_type'],
+    'parent_bundle' => $instance['bundle'],
+    'field_name' => $instance['field_name'],
+    'entity_type' => $settings['entity_type'],
+    'allowed_bundles' => $settings['bundles'],
+  );
+  drupal_alter('inline_entity_form_table_fields', $fields, $context);
+  $element['entities']['#table_fields'] = $fields;
+  $weight_delta = max(ceil(count($form_state['inline_entity_form'][$ief_id]['entities']) * 1.2), 50);
+  
+  $last_entity = end($form_state['inline_entity_form'][$ief_id]['entities']);
+  $form_state['last_entry'] = $last_entity['entity'];
+  foreach ($form_state['inline_entity_form'][$ief_id]['entities'] as $key => $value) {
+    // Data used by theme_inline_entity_form_entity_table().
+    $element['entities'][$key]['#entity'] = $entity = $value['entity'];
+    $element['entities'][$key]['#needs_save'] = $value['needs_save'];
+
+    // Handle row weights.
+    $element['entities'][$key]['#weight'] = $value['weight'];
+
+    // First check to see if this entity should be displayed as a form.
+    if (empty($value['form'])) $value['form'] = 'edit';
+    if (!empty($value['form'])) {
+      $element['entities'][$key]['delta'] = array(
+        '#type' => 'value',
+        '#value' => $value['weight'],
+      );
+      $element['entities'][$key]['form'] = array(
+        '#type' => 'container',
+        '#attributes' => array('class' => array('ief-form', 'ief-form-row')),
+        '#op' => $value['form'],
+        // Used by Field API and controller methods to find the relevant
+        // values in $form_state.
+        '#parents' => array_merge($parents, array('entities', $key, 'form')),
+        // Store the entity on the form, later modified in the controller.
+        '#entity' => $entity,
+        '#entity_type' => $settings['entity_type'],
+        // Pass the langcode of the parent entity,
+        '#parent_language' => $parent_langcode,
+        // Identifies the IEF widget to which the form belongs.
+        '#ief_id' => $ief_id,
+        // Identifies the table row to which the form belongs.
+        '#ief_row_delta' => $key,
+      );
+      // Prepare data for the form callbacks.
+      $form = &$element['entities'][$key]['form'];
+      // Add the appropriate form.
+      if ($value['form'] == 'edit') {
+        $form += commerce_inline_shopee_entity_form($controller, $form, $form_state);
+      }
+      elseif ($value['form'] == 'remove') {
+        $form += inline_entity_form_remove_form($controller, $form, $form_state);
+      }
+      $form['actions']['ief_remove_confirm'] = array(
+        '#type' => 'submit',
+        '#value' => t('Remove'),
+        '#name' => 'ief-remove-confirm-' . $key,
+        '#limit_validation_errors' => array($form['#parents']),
+        '#ajax' => array(
+          'callback' => 'inline_entity_form_get_element',
+          'wrapper' => 'inline-entity-form-' . $form['#ief_id'],
+        ),
+        '#submit' => array('inline_entity_form_remove_confirm'),
+        '#ief_row_delta' => $form['#ief_row_delta'],
+      );
+    }
+    else {
+      $row = &$element['entities'][$key];
+      $row['delta'] = array(
+        '#type' => 'weight',
+        '#delta' => $weight_delta,
+        '#default_value' => $value['weight'],
+        '#attributes' => array('class' => array('ief-entity-delta')),
+      );
+      // Add an actions container with edit and delete buttons for the entity.
+      $row['actions'] = array(
+        '#type' => 'container',
+        '#attributes' => array('class' => array('ief-entity-operations')),
+      );
+
+      // Make sure entity_access is not checked for unsaved entities.
+      list($entity_id) = entity_extract_ids($controller->entityType(), $entity);
+      if (empty($entity_id) || entity_access('update', $controller->entityType(), $entity)) {
+        $row['actions']['ief_entity_edit'] = array(
+          '#type' => 'submit',
+          '#value' => t('Edit'),
+          '#name' => 'ief-' . $ief_id . '-entity-edit-' . $key,
+          '#limit_validation_errors' => array(),
+          '#ajax' => array(
+            'callback' => 'inline_entity_form_get_element',
+            'wrapper' => $wrapper,
+          ),
+          '#submit' => array('inline_entity_form_open_row_form'),
+          '#ief_row_delta' => $key,
+          '#ief_row_form' => 'edit',
+        );
+      }
+
+      // If 'allow_existing' is on, the default removal operation is unlink
+      // and the access check for deleting happens inside the controller
+      // removeForm() method.
+      if (empty($entity_id) || $controller->getSetting('allow_existing')
+        || entity_access('delete', $controller->entityType(), $entity)) {
+        $row['actions']['ief_entity_remove'] = array(
+          '#type' => 'submit',
+          '#value' => t('Remove'),
+          '#name' => 'ief-' . $ief_id . '-entity-remove-' . $key,
+          '#limit_validation_errors' => array(),
+          '#ajax' => array(
+            'callback' => 'inline_entity_form_get_element',
+            'wrapper' => $wrapper,
+          ),
+          '#submit' => array('inline_entity_form_open_row_form'),
+          '#ief_row_delta' => $key,
+          '#ief_row_form' => 'remove',
+        );
+      }
+    }
+  }
+
+  if ($cardinality > 1) {
+    // Add a visual cue of cardinality count.
+    $message = t('You have added @entities_count out of @cardinality_count allowed @label.', array(
+      '@entities_count' => $entity_count,
+      '@cardinality_count' => $cardinality,
+      '@label' => $labels['plural'],
+    ));
+    $element['cardinality_count'] = array(
+      '#markup' => '<div class="ief-cardinality-count">' . $message . '</div>',
+    );
+  }
+  // Do not return the rest of the form if cardinality count has been reached.
+  if ($cardinality_reached) {
+    return $element;
+  }
+
+  $hide_cancel = FALSE;
+  // If the field is required and empty try to open one of the forms.
+  if (empty($form_state['inline_entity_form'][$ief_id]['entities']) && $instance['required']) {
+    if ($controller->getSetting('allow_existing') && !$controller->getSetting('allow_new')) {
+      $form_state['inline_entity_form'][$ief_id]['form'] = 'ief_add_existing';
+      $hide_cancel = TRUE;
+    }
+    elseif (count($settings['create_bundles']) == 1 && $controller->getSetting('allow_new') && !$controller->getSetting('allow_existing')) {
+      $bundle = reset($settings['create_bundles']);
+
+      // The parent entity type and bundle must not be the same as the inline
+      // entity type and bundle, to prevent recursion.
+      if ($element['#entity_type'] != $settings['entity_type'] || $element['#bundle'] != $bundle) {
+        $form_state['inline_entity_form'][$ief_id]['form'] = 'add';
+        $form_state['inline_entity_form'][$ief_id]['form settings'] = array(
+          'bundle' => $bundle,
+        );
+        $hide_cancel = TRUE;
+      }
+    }
+  }
+
+  // If no form is open, show buttons that open one.
+  if (empty($form_state['inline_entity_form'][$ief_id]['form'])) {
+    $element['actions'] = array(
+      '#attributes' => array('class' => array('container-inline')),
+      '#type' => 'container',
+      '#weight' => 100,
+    );
+
+    // The user is allowed to create an entity of at least one bundle.
+    if (count($settings['create_bundles'])) {
+      // Let the user select the bundle, if multiple are available.
+      if (count($settings['create_bundles']) > 1) {
+        $bundles = array();
+        foreach ($entity_info['bundles'] as $bundle_name => $bundle_info) {
+          if (in_array($bundle_name, $settings['create_bundles'])) {
+            $bundles[$bundle_name] = $bundle_info['label'];
+          }
+        }
+        asort($bundles);
+
+        $element['actions']['bundle'] = array(
+          '#type' => 'select',
+          '#options' => $bundles,
+        );
+      }
+      else {
+        $element['actions']['bundle'] = array(
+          '#type' => 'value',
+          '#value' => reset($settings['create_bundles']),
+        );
+      }
+      if ($controller->getSetting('allow_new')) {
+        $element['actions']['ief_add'] = array(
+          '#type' => 'submit',
+          '#value' => t('Add new @type_singular', array('@type_singular' => $labels['singular'])),
+          '#name' => 'ief-' . $ief_id . '-add',
+          '#limit_validation_errors' => array(array_merge($parents, array('actions'))),
+          '#ajax' => array(
+            'callback' => 'inline_entity_form_get_element',
+            'wrapper' => $wrapper,
+          ),
+          '#submit' => array('inline_entity_form_open_form'),
+          '#ief_form' => 'add',
+        );
+      }
+    }
+  }
+  else {
+    $form_key = (!isset($form_key)) ? 0 : $form_key++;
+    $is_new = empty($form_state['inline_entity_form'][$ief_id]['entities']) ? TRUE : FALSE;
+    // There's a form open, show it.
+    $element['form'][$form_key] = array(
+      '#type' => 'fieldset',
+      '#attributes' => array('class' => array('ief-form', 'ief-form-bottom')),
+      // Identifies the IEF widget to which the form belongs.
+      '#ief_id' => $ief_id,
+      // Used by Field API and controller methods to find the relevant
+      // values in $form_state.
+      '#parents' => array_merge($parents, array('form')),
+      // Pass the current entity type.
+      '#entity_type' => $settings['entity_type'],
+      // Pass the langcode of the parent entity,
+      '#parent_language' => $parent_langcode,
+      '#table_fields' => $fields,
+      '#is_new' => $is_new,
+    );
+    if (!$is_new) $element['form'][$form_key]['#attributes']['class'][] = 'has-product';
+    if ($form_state['inline_entity_form'][$ief_id]['form'] == 'add') {
+      $element['form'][$form_key]['#op'] = 'add';
+      $element['form'][$form_key] += commerce_inline_shopee_entity_form($controller, $element['form'][$form_key], $form_state);
+      $element['form'][$form_key]['#theme'] = 'commerce_inline_shopee_open_table'; //if (!$is_new) 
+    }
+
+    // Pre-opened forms can't be closed in order to force the user to
+    // add / reference an entity.
+    if ($hide_cancel) {
+      if (isset($element['form'][$form_key]['actions']['ief_add_cancel'])) {
+        $element['form'][$form_key]['actions']['ief_add_cancel']['#access'] = FALSE;
+      }
+      elseif (isset($element['form']['actions']['ief_reference_cancel'])) {
+        $element['form']['actions']['ief_reference_cancel']['#access'] = FALSE;
+      }
+    }
+
+    // No entities have been added. Remove the outer fieldset to reduce
+    // visual noise caused by having two titles.
+    if (empty($form_state['inline_entity_form'][$ief_id]['entities'])) {
+      $element['#type'] = 'container';
+    }
+  }
+
+  return $element;
+}
+
+/**
+ * Wraps and returns the entity form provided by the passed-in controller.
+ *
+ * @param $controller
+ *   The inline entity form controller.
+ * @param $entity_form
+ *   The form array that will receive the entity form.
+ * @param $form_state
+ *   The form state of the parent form.
+ *
+ * @return
+ *   The form array containing the embedded entity form.
+ */
+
+function commerce_inline_shopee_entity_form($controller, $entity_form, &$form_state) {
+  $labels = $controller->labels();
+  // Build a deta suffix that's appended to button #name keys for uniqueness.
+  $delta = $entity_form['#ief_id'];
+  if ($entity_form['#op'] == 'edit') {
+    $delta .= '-' . $entity_form['#ief_row_delta'];
+    $save_label = t('Update @type_singular', array('@type_singular' => $labels['singular']));
+  }
+  elseif ($entity_form['#op'] == 'add') {
+    // Create a new entity that will be passed to the form.
+    $form_settings = $form_state['inline_entity_form'][$entity_form['#ief_id']]['form settings'];
+    $entity_form['#entity'] = inline_entity_form_create_entity($entity_form['#entity_type'], $form_settings['bundle'], $entity_form['#parent_language']);
+    if (empty($form_state['inline_entity_form'][$entity_form['#ief_id']]['entities'])) {
+      $entity_form['#title'] = t('Add new @type_singular', array('@type_singular' => $labels['singular']));
+    }
+    $save_label = t('Add');
+  }
+
+  // Retrieve the form provided by the controller.
+  $entity_form = $controller->entityForm($entity_form, $form_state);
+
+  // Add the actions
+  $entity_form['actions'] = array(
+    '#type' => 'container',
+    '#weight' => 100,
+  );
+  
+  //Only show this when adding new products
+  if ($entity_form['#op'] == 'add') {
+    $entity_form['actions']['ief_' . $entity_form['#op'] . '_save'] = array(
+      '#type' => 'submit',
+      '#value' => $save_label,
+      '#name' => 'ief-' . $entity_form['#op'] . '-submit-' . $delta,
+      '#limit_validation_errors' => array($entity_form['#parents']),
+      '#attributes' => array('class' => array('ief-entity-submit')),
+      '#ajax' => array(
+        'callback' => 'inline_entity_form_get_element',
+        'wrapper' => 'inline-entity-form-' . $entity_form['#ief_id'],
+      ),
+    );
+    $entity_form['actions']['ief_' . $entity_form['#op'] . '_cancel'] = array(
+      '#type' => 'submit',
+      '#value' => t('Cancel'),
+      '#name' => 'ief-' . $entity_form['#op'] . '-cancel-' . $delta,
+      '#limit_validation_errors' => array(),
+      '#ajax' => array(
+        'callback' => 'inline_entity_form_get_element',
+        'wrapper' => 'inline-entity-form-' . $entity_form['#ief_id'],
+      ),
+    );
+  }
+
+  // Add the appropriate submit handlers and their related data.
+  if (in_array($entity_form['#op'], array('add', 'clone'))) {
+    $entity_form['actions']['ief_' . $entity_form['#op'] . '_save']['#submit'] = array(
+      'inline_entity_form_trigger_submit',
+      'inline_entity_form_close_child_forms',
+      'inline_entity_form_close_form',
+    );
+    $entity_form['actions']['ief_' . $entity_form['#op'] . '_cancel']['#submit'] = array(
+      'inline_entity_form_close_child_forms',
+      'inline_entity_form_close_form',
+      'inline_entity_form_cleanup_form_state',
+    );
+  }
+  else {
+    $entity_form['actions']['ief_edit_save']['#ief_row_delta'] = $entity_form['#ief_row_delta'];
+    $entity_form['actions']['ief_edit_cancel']['#ief_row_delta'] = $entity_form['#ief_row_delta'];
+
+    $entity_form['actions']['ief_edit_save']['#submit'] = array(
+      'inline_entity_form_trigger_submit',
+      'inline_entity_form_close_child_forms',
+      'inline_entity_form_close_row_form',
+    );
+    $entity_form['actions']['ief_edit_cancel']['#submit'] = array(
+      'inline_entity_form_close_child_forms',
+      'inline_entity_form_close_row_form',
+      'inline_entity_form_cleanup_row_form_state',
+    );
+  }
+
+  $entity_form['#element_validate'][] = 'inline_entity_form_entity_form_validate';
+  $entity_form['#ief_element_submit'][] = 'inline_entity_form_entity_form_submit';
+  // Add the pre_render callback that powers the #fieldset form element key,
+  // which moves the element to the specified fieldset without modifying its
+  // position in $form_state['values'].
+  $entity_form['#pre_render'][] = 'inline_entity_form_pre_render_add_fieldset_markup';
+
+  // Allow other modules to alter the form.
+  drupal_alter('commerce_inline_shopee_entity_form', $entity_form, $form_state);
+
+  return $entity_form;
+}
+
+/**
+ * Implements hook_theme().
+ */
+function commerce_inline_shopee_theme($existing, $type, $theme, $path) { 
+  return array(
+    'commerce_inline_shopee_entity_table' => array(
+      'render element' => 'form',
+    ),
+    'commerce_inline_shopee_open_table' => array(
+      'render element' => 'form',
+    ),
+  );
+}
+
+/**
+ * Themes the table showing existing entity references in the widget.
+ *
+ * @param $variables
+ *   Contains the form element data from $element['entities'].
+ */
+function theme_commerce_inline_shopee_entity_table($variables) {
+  $form = $variables['form'];
+  $entity_type = $form['#entity_type'];
+  $fields = $form['#table_fields'];
+  $has_tabledrag = inline_entity_form_has_tabledrag($form);
+  // Sort the fields by weight.
+  uasort($fields, 'drupal_sort_weight');
+
+  $header = array();
+  if ($has_tabledrag) {
+    $header[] = array('data' => '', 'class' => array('ief-tabledrag-header'));
+    $header[] = array('data' => t('Sort order'), 'class' => array('ief-sort-order-header'));
+  }
+  // Add header columns for each field.
+  $first = TRUE;
+  foreach ($fields as $field_name => $field) {
+    $column = array('data' => $field['label']);
+    // The first column gets a special class.
+    if ($first) {
+      $column['class'] = array('ief-first-column-header');
+      $first = FALSE;
+    }
+    $header[] = $column;
+  }
+  $header[] = 'Operations';
+
+  // Build an array of entity rows for the table.
+  $rows = array();
+  foreach (element_children($form) as $key) {
+    $row_classes = array('ief-row-entity');
+    $row = array();
+    $cells = array();
+    if ($has_tabledrag) {
+      $cells[] = array('data' => '', 'class' => array('ief-tabledrag-handle'));
+      $cells[] = drupal_render($form[$key]['delta']);
+      $row_classes[] = 'draggable';
+    }
+    // Add a special class to rows that have a form underneath, to allow
+    // for additional styling.
+    if (!empty($form[$key]['form'])) {
+      $row_classes[] = 'ief-row-entity-form';
+    }
+
+    // Add fields that represent the entity.
+    $cells[] = drupal_render($form[$key]['form']['actions']);
+    // Create the row.
+    //$rows[] = array('data' => $cells, 'class' => $row_classes);
+    foreach ($fields as $field_name => $field) {
+      // If the current entity array specifies a form, output it in the next row.
+      if (!empty($form[$key]['form'])) {
+        $form[$key]['form'][$field_name]['#title_display'] = 'invisible';
+        $row[] = array('data' => drupal_render($form[$key]['form'][$field_name])); //, 'colspan' => count($fields) + 1 
+      }
+    }
+    //Only show the actions if it's for edit
+    if ($form[$key]['form']['#op'] == 'edit') $row[] = array('data' => render($form[$key]['form']['actions']));
+    // Add the buttons belonging to the "Operations" column.
+    $rows[] = array('data' => $row, 'class' => array('ief-row-form'), 'no_striping' => TRUE);
+  }
+
+  if (!empty($rows)) {
+    $id = 'ief-entity-table-' . $form['#id'];
+    if ($has_tabledrag) {
+      // Add the tabledrag JavaScript.
+      drupal_add_tabledrag($id, 'order', 'sibling', 'ief-entity-delta');
+    }
+
+    // Return the themed table.
+    $table_attributes = array(
+      'id' => $id,
+      'class' => array('ief-entity-table'),
+    );
+    return theme('table', array('header' => $header, 'rows' => $rows, 'sticky' => FALSE, 'attributes' => $table_attributes));
+  }
+}
+
+function theme_commerce_inline_shopee_open_table($variables) {
+  $form = $variables['form'];
+  $entity_type = $form['#entity_type'];
+  $field_info = field_info_instances($entity_type, $form['#entity']->type);
+  $form_product = $form['product_details'];
+  $fields = $form['#table_fields'];
+  // Sort the fields by weight.
+  uasort($fields, 'drupal_sort_weight');
+
+  $header = array();
+  $rows = array();
+  $row = array();
+  
+  // Add header columns for each field.
+  if ($form['#is_new']) {
+    $first = TRUE;
+    foreach ($fields as $field_name => $field) {
+      $column = array('data' => $field['label']);
+      // The first column gets a special class.
+      if ($first) {
+        $column['class'] = array('ief-first-column-header');
+        $first = FALSE;
+      }
+      $header[] = $column;
+    }
+    $header[] = 'Operations';
+  }
+
+  foreach ($fields as $field_name => $field) {
+    $type = (isset($field_info[$field_name]['commerce_cart_settings'])) ? 'product_attributes' : 'product_details';
+
+    // If the current entity array specifies a form, output it in the next row.
+    if (!empty($form[$type])) {
+      $form[$type][$field_name]['#title_display'] = 'invisible';
+      $row[] = array('data' => drupal_render($form[$type][$field_name]));
+    }
+  }
+  $row[] = array('data' => render($form['actions']));
+  $rows[] = array('data' => $row, 'class' => array('ief-row-form'), 'no_striping' => TRUE);
+
+  if (!empty($rows)) {
+    $id = 'ief-entity-table-' . $form['#id'];
+
+    // Return the themed table.
+    $table_attributes = array(
+      'id' => $id,
+      'class' => array('ief-entity-table'),
+    );
+  }
+  
+  return theme('table', array('header' => $header, 'rows' => $rows, 'sticky' => FALSE, 'attributes' => $table_attributes));
+}
+
+/**
+ * This is for the Shipping Weight
+ */
+function commerce_inline_shopee_commerce_physical_product_line_item_weight_alter(&$weight, $line_item) {
+  $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
+  if (!empty($line_item_wrapper->commerce_product)) {
+    $product = $line_item_wrapper->commerce_product->value();
+
+    if (!empty($product)) {
+      $node_id = $line_item_wrapper->value()->data['context']['entity']['entity_id'];
+      $node_wrapper = entity_metadata_wrapper('node', $node_id);
+      $field_name = commerce_physical_entity_weight_field_name('node', $node_wrapper->value());
+      if (!empty($field_name) && !empty($node_wrapper->{$field_name}->value())) {
+        // Extract the weight value from the product.
+        $weight = $node_wrapper->{$field_name}->value();
+
+        // Multiply the weight value by the quantity of the line item.
+        $weight['weight'] *= $line_item->quantity;
+      }
+    }
+  }
+}

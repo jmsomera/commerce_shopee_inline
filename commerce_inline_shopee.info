@@ -1,0 +1,10 @@
+name = Commerce Shopee
+description = "Make changes to the Inline Entity and Tariff for Products to look like Shopee Product Variation. Code is from inline_entity_form that\'s just been modified"
+package = Fields
+dependencies[] = inline_entity_form
+dependencies[] = commerce_stock
+dependencies[] = commerce_shipping_weight_tariff
+core = 7.x
+
+files[] = includes/entity.commerce_inline_shopee.inc
+files[] = includes/commerce_product.commerce_inline_shopee.inc

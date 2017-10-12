@@ -1,0 +1,48 @@
+.ief-entity-table {
+  margin-bottom: 0;
+}
+.ief-form-bottom.has-product {
+  padding: 0;
+  margin-top: 0;
+}
+.ief-form > .fieldset-wrapper {
+  border-top: 0 !important;
+  background: #FFFFFF;
+  padding: 0;
+}
+.ief-form .ief-entity-table {
+  border: 0;
+}
+.node-form .ief-row-form > td {
+  vertical-align: top;
+  padding: 5px;
+}
+.ief-row-form > td:last-child {
+  border-right: 0;
+  padding-top: 8px;
+}
+.ief-entity-table .form-item label, .ief-form-bottom.has-product .form-item label {
+  display: none;
+}
+tbody tr.ief-row-form {
+  border-bottom: 1px solid #bebfb9;
+}
+tbody tr.ief-row-form:last-child {
+  border-bottom: 0;
+}
+.ief-row-form .form-item, .ief-row-form .form-item div.description {
+  margin-bottom: 0;
+}
+.ief-form .ief-row-form > td:last-child {
+  width: 95px;
+}
+.ief-row-form > td:last-child .form-wrapper {
+  text-align: center;
+}
+.ief-row-form > td:last-child .form-wrapper input {
+  margin: 0;
+  display: inline-block;
+}
+.ief-row-form > td:last-child .form-wrapper input:first-child {
+  margin-bottom: 5px;
+}
